@@ -1,14 +1,10 @@
 from fabric.api import *
-from fabric.exceptions import NetworkError
 from fabric.colors import green as _green, blue as _blue, red as _red, yellow as _yellow
 from fabric.contrib.files import append as _fab_append, exists as _fab_exists
 from fabric.contrib.console import confirm
 from StringIO import StringIO as _strio    
 import boto
 from boto.s3.key import Key as _S3Key
-import boto.emr
-from boto.emr.step import InstallPigStep
-from boto.emr.step import PigStep
 from random import shuffle
 from urllib import urlretrieve
 import boto.ec2
@@ -31,7 +27,7 @@ AWS_PV_AMI_ID = 'ami-a8b4e6c0'
 AWS_HVM_AMI_ID = 'ami-3ab2e052'
 AWS_AZ = 'us-east-1b'
 AWS_INSTANCE_TYPE = 'm3.medium'
-AWS_SECURITY_GROUP = 'solr-scale-tk'
+AWS_SECURITY_GROUP = 'sg-b4a8f1d0' # 'solr-scale-tk'
 AWS_KEY_NAME = 'solr-scale-tk'
 ssh_user = 'ec2-user'
 user_home = '/home/' + ssh_user
@@ -98,15 +94,12 @@ def _copy_dir(src, dest):
     except OSError as e:
         print('Directory not copied. Error: %s' % e)
 
-def _runbg( command, out_file="/dev/null", err_file=None, shell=True, pty=False ):
-    run('nohup %s >%s 2>%s </dev/null &' % (command, out_file, err_file or '&1'), shell, pty)
-
 def _save_config():
     sstk_cfg = _get_config()
-    sstkCfg = os.path.expanduser('~/.sstk')
-    sstkCfgFile = open(sstkCfg, 'w')
-    sstkCfgFile.write(json.dumps(sstk_cfg, indent=2))
-    sstkCfgFile.close()
+    #sstkCfg = os.path.expanduser('~/.sstk')
+    #sstkCfgFile = open(sstkCfg, 'w')
+    #sstkCfgFile.write(json.dumps(sstk_cfg, indent=2))
+    #sstkCfgFile.close()
 
 def _expand_config_var(cluster, val):
     if len(val) > 0:
@@ -248,14 +241,6 @@ def _find_all_instances(cloud, onlyIfRunning=True):
 def _find_user_instances(cloud, username, onlyIfRunning=True):
     tagged = {}
     byTag = cloud.get_all_instances(filters={'tag:' + USERNAME_TAG:username})
-
-    numFound = len(byTag)
-    if numFound == 0:
-        time.sleep(1)
-        byTag = cloud.get_all_instances(filters={'tag:' + USERNAME_TAG:username})
-        numFound = len(byTag)
-        if numFound > 0:
-            _warn('AWS API is acting flakey! First call to find instances for '+username+' found 0, now it found: '+str(numFound))
         
     for rsrv in byTag:
         for inst in rsrv.instances:
@@ -283,13 +268,9 @@ def _ssh_to_new_instance(host):
     sshOk = False
     with settings(host_string=host), hide('output', 'running', 'warnings'):
         try:
-            run('whoami')
+            run('uname -a')
             sshOk = True
-        except NetworkError as e:
-            print e
-            sskOk = False
         except:
-            print "Unexpected error:", sys.exc_info()[0]
             sshOk = False
 
     return sshOk
@@ -425,7 +406,7 @@ SOLR_JAVA_MEM="%s"
 
 # Enable verbose GC logging
 GC_LOG_OPTS="-verbose:gc -XX:+PrintHeapAtGC -XX:+PrintGCDetails \
--XX:+PrintGCDateStamps -XX:+PrintGCCause -XX:+PrintTenuringDistribution -XX:+PrintGCApplicationStoppedTime"
+-XX:+PrintGCDateStamps -XX:+PrintGCTimeStamps -XX:+PrintTenuringDistribution -XX:+PrintGCApplicationStoppedTime"
 
 # These GC settings have shown to work well for a number of common Solr workloads
 GC_TUNE="-XX:NewRatio=3 \
@@ -448,7 +429,6 @@ GC_TUNE="-XX:NewRatio=3 \
 # Set the ZooKeeper connection string if using an external ZooKeeper ensemble
 # e.g. host1:2181,host2:2181/chroot
 # Leave empty if not using SolrCloud
-SOLR_MODE="solrcloud"
 ZK_HOST="%s"
 
 # Set the ZooKeeper client timeout (for SolrCloud mode)
@@ -465,11 +445,7 @@ SOLR_HOST=%s
 # JMX savvy tools like VisualVM remotely, set to "false" to disable that behavior
 # (recommended in production environments)
 ENABLE_REMOTE_JMX_OPTS="true"
-
-#SOLR_OPTS="$SOLR_OPTS -agentpath:/home/ec2-user/yjp-2014-build-14120/bin/linux-x86-64/libyjpagent.so"
-SOLR_OPTS="$SOLR_OPTS -Dsolr.autoCommit.maxTime=30000 -Dsolr.autoSoftCommit.maxTime=15000"
-
-''' % (remoteSolrJavaHome, solrJavaMemOpts, zkHost, solrHost))
+    ''' % (remoteSolrJavaHome, solrJavaMemOpts, zkHost, solrHost))
 
     return solrInSh
 
@@ -639,8 +615,7 @@ def _wait_to_see_solr_up_on_hosts(hostAndPorts, maxWait=180):
             _error(down+' is down!')
 
 def _restart_solr(cluster, host, solrPortBase, pauseBeforeRestart=0):
-    solrTip = _env(cluster, 'solr_tip')
-    binSolrScript = solrTip + '/bin/solr'
+    binSolrScript = _env(cluster, 'solr_tip') + '/bin/solr'
     solrPort = '89' + solrPortBase
     solrDir =  'cloud'+solrPortBase
     remoteStartCmd = '%s start -cloud -p %s -d %s' % (binSolrScript, solrPort, solrDir)
@@ -653,8 +628,7 @@ def _restart_solr(cluster, host, solrPortBase, pauseBeforeRestart=0):
                 _status('Sleeping for %d seconds before starting Solr node on %s' % (pauseTime, hostAndPort))
                 time.sleep(pauseTime)
         _status('Running start on remote: ' + remoteStartCmd)
-        run('rm -rf '+solrTip+'/'+solrDir+'/solr-webapp/webapp || true')
-        _runbg(remoteStartCmd)
+        run('nohup ' + remoteStartCmd + ' &', pty=False)
         time.sleep(2)
 
 def _stop_solr(cluster, host, solrPortBase):
@@ -663,7 +637,7 @@ def _stop_solr(cluster, host, solrPortBase):
     remoteStopCmd = '%s stop -p %s' % (binSolrScript, solrPort)
     with settings(host_string=host), hide('output', 'running', 'warnings'):
         _status('Running stop Solr on '+host+':'+solrPort+' ~ ' + remoteStopCmd)
-        _runbg(remoteStopCmd)
+        run(remoteStopCmd)
         time.sleep(2)
 
 def _get_instance_type(cloud, cluster):
@@ -904,7 +878,6 @@ def _rolling_restart_solr(cloud, cluster, solrHostsAndPortsToRestart=None, wait=
             time.sleep(int(wait))
 
 
-    is_solr_up(cluster)
     _info('Rolling restart completed.')
 
 def _configure_banana(metaHost):
@@ -1128,19 +1101,11 @@ def new_ec2_instances(cluster,
     _status('Going to launch %d new EC2 %s instances using AMI %s' % (num, instance_type, ami))
 
     # verify no cluster with the same ID already exists with running instances
-    existing = _find_instances_in_cluster(ec2, cluster, True)
+    existing = [] #_find_instances_in_cluster(ec2, cluster, True)
     if len(existing) > 0:
         if confirm('Found %d running instances for cluster %s, do you want re-use this cluster?' % (len(existing), cluster)):
             hosts = _cluster_hosts(ec2, cluster)
             ec2.close()
-
-            sstk_cfg = _get_config()
-            if sstk_cfg.has_key('clusters') is False:
-                sstk_cfg['clusters'] = {}
-
-            sstk_cfg['clusters'][cluster] = { 'provider':'ec2', 'name':cluster, 'hosts':hosts, 'username':username }
-            _save_config()
-
             return hosts
         else:
             _fatal('''Found %d running instances for cluster %s.
@@ -1182,35 +1147,43 @@ def new_ec2_instances(cluster,
 
     awsSecGroup = _env(cluster, 'AWS_SECURITY_GROUP')
     # launch the instances in EC2
+    interface = boto.ec2.networkinterface.NetworkInterfaceSpecification(subnet_id='subnet-0e35267a',
+                                                                        groups=[awsSecGroup],
+                                                                        associate_public_ip_address=True)
+    interfaces = boto.ec2.networkinterface.NetworkInterfaceCollection(interface)
+
     rsrv = ec2.run_instances(ami,
                              min_count=num,
                              max_count=num,
                              instance_type=instance_type,
                              key_name=key,
-                             security_groups=[awsSecGroup],
+                             network_interfaces=interfaces,
                              block_device_map=bdm,
                              monitoring_enabled=True,
                              placement=az,
                              placement_group=placement_group)
 
-    time.sleep(10) # sometimes the AWS API is a little sluggish in making these instances available to this API
+    #rsrv = ec2.run_instances(ami,
+    #                         min_count=num,
+    #                         max_count=num,
+    #                         instance_type=instance_type,
+    #                         key_name=key,
+    #                         security_group_ids=[awsSecGroup],
+    #                         subnet_id='subnet-0e35267a',
+    #                         block_device_map=bdm,
+    #                         monitoring_enabled=True,
+    #                         placement=az,
+    #                         placement_group=placement_group)
+
+    time.sleep(4) # sometimes the AWS API is a little sluggish in making these instances available to this API
     
     # add a tag to each instance so that we can filter many instances by our cluster tag
     username = getpass.getuser()
 
     for inst in rsrv.instances:
-        try:
-            inst.add_tag(CLUSTER_TAG, cluster)
-            inst.add_tag(USERNAME_TAG, username)
-            inst.add_tag(INSTANCE_STORES_TAG, numStores)
-        except: # catch all exceptions
-            e = sys.exc_info()[0]
-            _error('Error when tagging instance %s due to: %s ... will retry in 5 seconds ...' % (inst.id, str(e)))
-            time.sleep(5)
-            inst.add_tag(CLUSTER_TAG, cluster)
-            inst.add_tag(USERNAME_TAG, username)
-            inst.add_tag(INSTANCE_STORES_TAG, numStores)
-
+        inst.add_tag(CLUSTER_TAG, cluster)
+        inst.add_tag(USERNAME_TAG, username)
+        inst.add_tag(INSTANCE_STORES_TAG, numStores)
 
     numRunning = _poll_for_running_status(rsrv, maxWait=int(maxWait))
     if int(numRunning) != int(num):
@@ -1756,13 +1729,6 @@ def kill_mine():
                     cluster = my_instances[iid].tags['cluster']
                     sstk_cfg['clusters'].pop(cluster, None)
             _save_config()
-
-            # verify aws now reports as terminated
-            time.sleep(2)
-            my_instances = _find_user_instances(cloud, username)
-            instance_ids = my_instances.keys()
-            if len(instance_ids) > 0:
-                _error('Not all of your instances were terminated by AWS! Login to the AWS Console and terminate manually.')
 
 
     else:
@@ -2371,12 +2337,12 @@ def get_file(cluster,remote,n=0,local='./'):
     with settings(host_string=hosts[idx]):
         get(remote,str(localDir))
     
-def index_docs(cluster,collection,numDocs=20000,batchSize=100):
+def index_docs(cluster,collection,numDocs=20000):
     """
     Index synthetic documents into a collection; mostly only useful for demos.
     """
     zkHost = _read_cloud_env(cluster)['ZK_HOST'] # get the zkHost from the env on the server
-    local('./tools.sh indexer -collection=%s -zkHost=%s -numDocsToIndex=%d -batchSize=%d' % (collection, zkHost, int(numDocs), int(batchSize)))
+    local('./tools.sh indexer -collection=%s -zkHost=%s -numDocsToIndex=%d' % (collection, zkHost, int(numDocs)))
 
 def restart_solr(cluster,wait=0,pauseBeforeRestart=0):
     """
@@ -2947,114 +2913,3 @@ def setup_local(cluster,tip,solrVers='4.10.2',zkVers='3.4.6',fusionVers=None,ove
     if fusionTip is not None:
         _status('Local SolrCloud cluster started ... starting Fusion services ...')
         fusion_start(cluster)
-
-def new_emr_cluster(cluster, region='us-east-1', num='3', keep_alive=True, slave_instance_type='m1.xlarge', maxWait=360):
-    now = datetime.datetime.utcnow()
-    nowStr = now.strftime("%Y%m%d-%H%M%S")
-
-    availability_zone = _env(cluster, 'AWS_AZ')
-    keyname = _env(cluster, 'AWS_KEY_NAME')
-
-    pigStep = InstallPigStep()
-    steps = [pigStep]
-
-    emr = boto.emr.connect_to_region(region)
-
-    job_flow_id = emr.run_jobflow(cluster,
-                    log_uri='s3://emr-logs-'+cluster+'-'+nowStr+'/',
-                    availability_zone=availability_zone,
-                    master_instance_type='m3.xlarge',
-                    slave_instance_type=slave_instance_type,
-                    ec2_keyname=keyname,
-                    num_instances=int(num)+1,
-                    ami_version='3.6.0',
-                    keep_alive=keep_alive,
-                    steps=steps,
-                    enable_debugging=True,
-                    action_on_failure='CONTINUE')
-
-    _info('launched job_flow_id: %s, waiting up to %d secs to see it RUNNING' % (job_flow_id, maxWait))
-
-    waitTime = 0
-    startedAt = time.time()
-    isRunning = False
-    lastState = 'unknown'
-    while isRunning is False and waitTime < maxWait:
-        isRunning = True
-
-        status = emr.describe_jobflow(job_flow_id)
-        lastState = status.state
-        isRunning = (lastState == 'RUNNING')
-
-        if isRunning is False:
-            time.sleep(10)
-            waitTime = round(time.time() - startedAt)
-            _status('Waited %d seconds so far to verify cluster %s is running.' % (waitTime, job_flow_id))
-
-    if isRunning:
-        _info('Cluster '+job_flow_id+' is now running.')
-    else:
-        _error('Wait to see RUNNING state timed out after %d seconds! Last state was %s' % (maxWait, lastState))
-
-    # Save the Job Flow ID for lookup
-    sstk_cfg = _get_config()
-    if sstk_cfg.has_key('emr') is False:
-        sstk_cfg['emr'] = {}
-    if sstk_cfg['emr'].has_key(cluster) is False:
-        sstk_cfg['emr'][cluster] = {}
-    sstk_cfg['emr'][cluster]['job_flow_id'] = job_flow_id
-    _save_config()
-
-
-def run_s3_to_hdfs_job(emrCluster, input='s3://solr-scale-tk/pig/output/syn_sample_10m', output='syn_sample_10m', reducers='12', region='us-east-1'):
-
-    # lookup the job flow ID of the cluster
-    sstk_cfg = _get_config()
-    job_flow_id = sstk_cfg['emr'][emrCluster]['job_flow_id']
-
-    emr = boto.emr.connect_to_region(region)
-
-    now = datetime.datetime.utcnow()
-    nowStr = now.strftime("%Y%m%d-%H%M%S")
-
-    numReducers = int(reducers)
-
-    stepName = 'pig-s3_to_hdfs-'+nowStr
-    pigFile = 's3://solr-scale-tk/pig/s3_to_hdfs.pig'
-
-    pigArgs = ['-p','INPUT='+input,
-               '-p','RED='+str(numReducers),
-               '-p','OUTPUT='+output]
-    pigStep = PigStep(stepName, pig_file=pigFile, pig_args=pigArgs)
-
-    emr.add_jobflow_steps(job_flow_id, [pigStep])
-
-
-def run_indexing_job(emrCluster, solrCluster, collection, pig='s3_to_solr.pig', input='s3://solr-scale-tk/pig/output/syn_sample_10m', batch_size='1500', reducers='12', region='us-east-1'):
-
-    # lookup the job flow ID of the cluster
-    sstk_cfg = _get_config()
-    job_flow_id = sstk_cfg['emr'][emrCluster]['job_flow_id']
-
-    zkHost = _read_cloud_env(solrCluster)['ZK_HOST']
-
-    batchSize = int(batch_size)
-    numReducers = int(reducers)
-
-    emr = boto.emr.connect_to_region(region)
-
-    now = datetime.datetime.utcnow()
-    nowStr = now.strftime("%Y%m%d-%H%M%S")
-
-    stepName = 'pig-'+collection+'-'+nowStr
-    pigFile = 's3://solr-scale-tk/pig/'+pig
-
-    pigArgs = ['-p','INPUT='+input,
-               '-p','RED='+str(numReducers),
-               '-p','collection='+collection,
-               '-p','batch='+str(batchSize),
-               '-p','zkHost='+zkHost]
-
-    pigStep = PigStep(stepName, pig_file=pigFile, pig_args=pigArgs)
-
-    emr.add_jobflow_steps(job_flow_id, [pigStep])
